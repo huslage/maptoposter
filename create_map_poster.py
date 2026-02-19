@@ -1067,14 +1067,18 @@ Examples:
         "-W",
         type=float,
         default=12,
-        help="Image width in inches (default: 12, max: 20 )",
+        help="Image width (default: 12, max: 20). Unit set by --unit.",
     )
     parser.add_argument(
         "--height",
         "-H",
         type=float,
         default=16,
-        help="Image height in inches (default: 16, max: 20)",
+        help="Image height (default: 16, max: 20). Unit set by --unit.",
+    )
+    parser.add_argument(
+        "--unit", "-u", type=str, default="in", choices=["in", "mm"],
+        help="Unit for --width/--height: 'in' (inches, default) or 'mm'",
     )
     parser.add_argument(
         "--list-themes", action="store_true", help="List all available themes"
@@ -1082,6 +1086,10 @@ Examples:
     parser.add_argument(
         "--topo", action="store_true",
         help="Render as a topographic contour map instead of a road map",
+    )
+    parser.add_argument(
+        "--title", "-T", type=str, default=None,
+        help="Custom title printed on the poster (overrides --display-city)",
     )
     parser.add_argument(
         "--display-city",
@@ -1125,6 +1133,16 @@ Examples:
         print("Error: --city and --country are required.\n")
         print_examples()
         sys.exit(1)
+
+    # Convert mm to inches if requested
+    if args.unit == "mm":
+        MM_PER_INCH = 25.4
+        args.width = args.width / MM_PER_INCH
+        args.height = args.height / MM_PER_INCH
+
+    # --title overrides --display-city
+    if args.title:
+        args.display_city = args.title
 
     # Enforce maximum dimensions
     if args.width > 20:
