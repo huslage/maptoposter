@@ -1,3 +1,14 @@
 cache/*
 env/
 .env/
+# venv at repo root (python -m venv .)
+bin/
+include/
+lib/
+lib64
+pyvenv.cfg
+__pycache__/
+*.pyc
+# generated output
+posters/
+fonts/google_fonts/
