@@ -37,6 +37,58 @@ from tqdm import tqdm
 from font_management import load_fonts
 
 
+# ── Console output helpers ────────────────────────────────────────────────────
+_COL = 56  # ruler width
+
+
+def _rule(char="─"):
+    print(char * _COL)
+
+
+def _header():
+    print("City Map Poster Generator")
+    _rule()
+
+
+def _footer():
+    _rule()
+
+
+def _row(label, value):
+    """Key/value line, e.g. '  Theme    Midnight Blue'."""
+    print(f"  {label:<10}{value}")
+
+
+def _ok(msg):
+    print(f"  ✓  {msg}")
+
+
+def _warn(msg):
+    print(f"  ⚠  {msg}")
+
+
+def _err(msg):
+    print(f"  ✗  {msg}")
+
+
+def _step(n, total, label):
+    """Print step prefix inline; caller follows with _done() or _skip()."""
+    prefix = f"  [{n}/{total}] {label}"
+    print(f"{prefix:<{_COL - 4}}", end="", flush=True)
+
+
+def _done(note=""):
+    tail = f"  {note}" if note else ""
+    print(f"✓{tail}")
+
+
+def _skip(reason=""):
+    print(f"—  {reason}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class CacheError(Exception):
     """Raised when a cache operation fails."""
 
@@ -186,7 +238,7 @@ def load_theme(theme_name="terracotta"):
     theme_file = os.path.join(THEMES_DIR, f"{theme_name}.json")
 
     if not os.path.exists(theme_file):
-        print(f"⚠ Theme file '{theme_file}' not found. Using default terracotta theme.")
+        _warn(f"Theme '{theme_name}' not found — using default terracotta")
         # Fallback to embedded terracotta theme
         return {
             "name": "Terracotta",
@@ -206,9 +258,6 @@ def load_theme(theme_name="terracotta"):
 
     with open(theme_file, "r", encoding=FILE_ENCODING) as f:
         theme = json.load(f)
-        print(f"✓ Loaded theme: {theme.get('name', theme_name)}")
-        if "description" in theme:
-            print(f"  {theme['description']}")
         return theme
 
 
@@ -375,10 +424,13 @@ def fetch_elevation_grid(point, dist):
             if os.path.exists(cache_file):
                 arr = np.load(cache_file)
             else:
-                print(f"  Fetching elevation tile {name}...")
+                print(f"    tile {name}...", end="", flush=True)
                 arr = _download_srtm_tile(tlat, tlon)
                 if arr is not None:
+                    print("✓")
                     np.save(cache_file, arr)
+                else:
+                    print("✗")
             if arr is not None:
                 tile_data[(tlat, tlon)] = arr
                 side = arr.shape[0]
@@ -411,10 +463,7 @@ def get_coordinates(city, country):
     coords = f"coords_{city.lower()}_{country.lower()}"
     cached = cache_get(coords)
     if cached:
-        print(f"✓ Using cached coordinates for {city}, {country}")
         return cached
-
-    print("Looking up coordinates...")
     geolocator = Nominatim(user_agent="city_map_poster", timeout=10)
 
     # Add a small delay to respect Nominatim's usage policy
@@ -441,17 +490,10 @@ def get_coordinates(city, country):
             location = loop.run_until_complete(location)
 
     if location:
-        # Use getattr to safely access address (helps static analyzers)
-        addr = getattr(location, "address", None)
-        if addr:
-            print(f"✓ Found: {addr}")
-        else:
-            print("✓ Found location (address not available)")
-        print(f"✓ Coordinates: {location.latitude}, {location.longitude}")
         try:
             cache_set(coords, (location.latitude, location.longitude))
-        except CacheError as e:
-            print(e)
+        except CacheError:
+            pass
         return (location.latitude, location.longitude)
 
     raise ValueError(f"Could not find coordinates for {city}, {country}")
@@ -511,20 +553,17 @@ def fetch_graph(point, dist) -> MultiDiGraph | None:
     graph = f"graph_{lat}_{lon}_{dist}"
     cached = cache_get(graph)
     if cached is not None:
-        print("✓ Using cached street network")
         return cast(MultiDiGraph, cached)
 
     try:
         g = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all', truncate_by_edge=True)
-        # Rate limit between requests
         time.sleep(0.5)
         try:
             cache_set(graph, g)
-        except CacheError as e:
-            print(e)
+        except CacheError:
+            pass
         return g
-    except Exception as e:
-        print(f"OSMnx error while fetching graph: {e}")
+    except Exception:
         return None
 
 
@@ -549,20 +588,17 @@ def fetch_features(point, dist, tags, name) -> GeoDataFrame | None:
     features = f"{name}_{lat}_{lon}_{dist}_{tag_str}"
     cached = cache_get(features)
     if cached is not None:
-        print(f"✓ Using cached {name}")
         return cast(GeoDataFrame, cached)
 
     try:
         data = ox.features_from_point(point, tags=tags, dist=dist)
-        # Rate limit between requests
         time.sleep(0.3)
         try:
             cache_set(features, data)
-        except CacheError as e:
-            print(e)
+        except CacheError:
+            pass
         return data
-    except Exception as e:
-        print(f"OSMnx error while fetching features: {e}")
+    except Exception:
         return None
 
 
@@ -612,25 +648,28 @@ def create_poster(
 
     if topo:
         # --- Topographic mode: elevation contours ---
-        print("Fetching elevation data...")
+        _step(1, 3, "Elevation data")
         elev_lons, elev_lats, elev_grid = fetch_elevation_grid(point, dist)
         if elev_grid is None:
+            print()
             raise RuntimeError("Could not download elevation data for this location.")
+        _done()
 
-        print("  Downloading water features...")
+        _step(2, 3, "Water features")
         water = fetch_features(
             point, dist,
             tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank"},
             name="water",
         )
-        print("  Downloading parks/green spaces...")
+        _done()
+
+        _step(3, 3, "Parks")
         parks = fetch_features(
             point, dist,
             tags={"leisure": "park", "landuse": "grass"},
             name="parks",
         )
-
-        print("Rendering topographic map...")
+        _done()
         fig, ax = plt.subplots(figsize=(width, height), facecolor=THEME["bg"])
         ax.set_facecolor(THEME["bg"])
         ax.set_position((0.0, 0.0, 1.0, 1.0))
@@ -685,40 +724,26 @@ def create_poster(
 
     else:
         # --- Road map mode (default) ---
-        with tqdm(
-            total=3,
-            desc="Fetching map data",
-            unit="step",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}",
-        ) as pbar:
-            # 1. Fetch Street Network
-            pbar.set_description("Downloading street network")
-            g = fetch_graph(point, dist)
-            pbar.update(1)
+        _step(1, 3, "Street network")
+        g = fetch_graph(point, dist)
+        _done()
 
-            # 2. Fetch Water Features
-            pbar.set_description("Downloading water features")
-            water = fetch_features(
-                point,
-                dist,
-                tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank"},
-                name="water",
-            )
-            pbar.update(1)
+        _step(2, 3, "Water features")
+        water = fetch_features(
+            point, dist,
+            tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank"},
+            name="water",
+        )
+        _done()
 
-            # 3. Fetch Parks
-            pbar.set_description("Downloading parks/green spaces")
-            parks = fetch_features(
-                point,
-                dist,
-                tags={"leisure": "park", "landuse": "grass"},
-                name="parks",
-            )
-            pbar.update(1)
+        _step(3, 3, "Parks")
+        parks = fetch_features(
+            point, dist,
+            tags={"leisure": "park", "landuse": "grass"},
+            name="parks",
+        )
+        _done()
 
-        print("✓ All data retrieved successfully!")
-
-        print("Rendering map...")
         fig, ax = plt.subplots(figsize=(width, height), facecolor=THEME["bg"])
         ax.set_facecolor(THEME["bg"])
         ax.set_position((0.0, 0.0, 1.0, 1.0))
@@ -726,7 +751,6 @@ def create_poster(
         if g is not None:
             g_proj = ox.project_graph(g)
 
-            # Layer 1: Polygons (projected to match graph CRS)
             if water is not None and not water.empty:
                 water_polys = water[water.geometry.type.isin(["Polygon", "MultiPolygon"])]
                 if not water_polys.empty:
@@ -744,8 +768,6 @@ def create_poster(
                         parks_polys = parks_polys.to_crs(g_proj.graph['crs'])
                     parks_polys.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=0.8)
 
-            # Layer 2: Roads
-            print("Applying road hierarchy colors...")
             edge_colors = get_edge_colors_by_type(g_proj)
             edge_widths = get_edge_widths_by_type(g_proj)
             crop_xlim, crop_ylim = get_crop_limits(g_proj, point, fig, dist)
@@ -761,8 +783,7 @@ def create_poster(
             ax.set_xlim(crop_xlim)
             ax.set_ylim(crop_ylim)
         else:
-            # No road network (e.g. park/lake with no roads) — show water/parks in lat/lon
-            print("⚠ No road network found — rendering water/parks only.")
+            _warn("No road network found — rendering water/parks only")
             lat_deg = dist / 111000.0
             lon_deg = dist / (111000.0 * math.cos(math.radians(point[0])))
             ax.set_xlim(point[1] - lon_deg, point[1] + lon_deg)
@@ -916,8 +937,7 @@ def create_poster(
     )
 
     # 5. Save
-    print(f"Saving to {output_file}...")
-
+    _step(0, 0, f"Saving  →  {output_file}")
     fmt = output_format.lower()
     save_kwargs = dict(
         facecolor=THEME["bg"],
@@ -932,7 +952,7 @@ def create_poster(
     plt.savefig(output_file, format=fmt, **save_kwargs)
 
     plt.close()
-    print(f"✓ Done! Poster saved as {output_file}")
+    _done()
 
 
 def print_examples():
@@ -1180,32 +1200,49 @@ Examples:
         themes_to_generate = available_themes
     else:
         if args.theme not in available_themes:
-            print(f"Error: Theme '{args.theme}' not found.")
-            print(f"Available themes: {', '.join(available_themes)}")
+            _err(f"Theme '{args.theme}' not found  (available: {', '.join(available_themes)})")
             sys.exit(1)
         themes_to_generate = [args.theme]
 
-    print("=" * 50)
-    print("City Map Poster Generator")
-    print("=" * 50)
+    # ── Header ───────────────────────────────────────────────────────────────
+    _header()
 
-    # Load custom fonts if specified
+    # Load custom fonts (before summary so we know if it succeeded)
     custom_fonts = None
     if args.font_family:
+        _step(0, 0, f"Font     {args.font_family}")
         custom_fonts = load_fonts(args.font_family)
-        if not custom_fonts:
-            print(f"⚠ Failed to load '{args.font_family}', falling back to Roboto")
+        if custom_fonts:
+            _done()
+        else:
+            _skip("not found, using Roboto")
 
-    # Get coordinates and generate poster
+    # Resolve coordinates
     try:
         if args.latitude and args.longitude:
-            lat = parse(args.latitude)
-            lon = parse(args.longitude)
-            coords = [lat, lon]
-            print(f"✓ Coordinates: {', '.join([str(i) for i in coords])}")
+            coords = [parse(args.latitude), parse(args.longitude)]
         else:
+            _step(0, 0, "Geocoding")
             coords = get_coordinates(args.city, args.country)
+            _done()
+    except Exception as e:
+        _err(str(e))
+        sys.exit(1)
 
+    # Print run summary
+    lat, lon = coords
+    lat_str = f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}"
+    lon_str = f"{abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
+    theme_obj = load_theme(themes_to_generate[0])
+    _row("Theme",  theme_obj.get("name", themes_to_generate[0]))
+    _row("Canvas", f"{args.width:.4g} × {args.height:.4g} in  ·  {args.format.upper()}")
+    _row("Coords", f"{lat_str},  {lon_str}")
+    _row("Radius", f"{args.distance:,} m")
+    if args.topo:
+        _row("Mode", "topographic")
+    print()
+
+    try:
         for theme_name in themes_to_generate:
             THEME = load_theme(theme_name)
             output_file = generate_output_filename(args.city, theme_name, args.format)
@@ -1225,13 +1262,12 @@ Examples:
                 topo=args.topo,
             )
 
-        print("\n" + "=" * 50)
-        print("✓ Poster generation complete!")
-        print("=" * 50)
+        print()
+        _footer()
 
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print()
+        _err(str(e))
         import traceback
-
         traceback.print_exc()
         sys.exit(1)
