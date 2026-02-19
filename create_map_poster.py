@@ -693,17 +693,14 @@ def create_poster(
         ) as pbar:
             # 1. Fetch Street Network
             pbar.set_description("Downloading street network")
-            compensated_dist = dist * (max(height, width) / min(height, width)) / 4
-            g = fetch_graph(point, compensated_dist)
-            if g is None:
-                raise RuntimeError("Failed to retrieve street network data.")
+            g = fetch_graph(point, dist)
             pbar.update(1)
 
             # 2. Fetch Water Features
             pbar.set_description("Downloading water features")
             water = fetch_features(
                 point,
-                compensated_dist,
+                dist,
                 tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank"},
                 name="water",
             )
@@ -713,7 +710,7 @@ def create_poster(
             pbar.set_description("Downloading parks/green spaces")
             parks = fetch_features(
                 point,
-                compensated_dist,
+                dist,
                 tags={"leisure": "park", "landuse": "grass"},
                 name="parks",
             )
@@ -726,42 +723,60 @@ def create_poster(
         ax.set_facecolor(THEME["bg"])
         ax.set_position((0.0, 0.0, 1.0, 1.0))
 
-        g_proj = ox.project_graph(g)
+        if g is not None:
+            g_proj = ox.project_graph(g)
 
-        # Layer 1: Polygons
-        if water is not None and not water.empty:
-            water_polys = water[water.geometry.type.isin(["Polygon", "MultiPolygon"])]
-            if not water_polys.empty:
-                try:
-                    water_polys = ox.projection.project_gdf(water_polys)
-                except Exception:
-                    water_polys = water_polys.to_crs(g_proj.graph['crs'])
-                water_polys.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=0.5)
-        if parks is not None and not parks.empty:
-            parks_polys = parks[parks.geometry.type.isin(["Polygon", "MultiPolygon"])]
-            if not parks_polys.empty:
-                try:
-                    parks_polys = ox.projection.project_gdf(parks_polys)
-                except Exception:
-                    parks_polys = parks_polys.to_crs(g_proj.graph['crs'])
-                parks_polys.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=0.8)
+            # Layer 1: Polygons (projected to match graph CRS)
+            if water is not None and not water.empty:
+                water_polys = water[water.geometry.type.isin(["Polygon", "MultiPolygon"])]
+                if not water_polys.empty:
+                    try:
+                        water_polys = ox.projection.project_gdf(water_polys)
+                    except Exception:
+                        water_polys = water_polys.to_crs(g_proj.graph['crs'])
+                    water_polys.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=0.5)
+            if parks is not None and not parks.empty:
+                parks_polys = parks[parks.geometry.type.isin(["Polygon", "MultiPolygon"])]
+                if not parks_polys.empty:
+                    try:
+                        parks_polys = ox.projection.project_gdf(parks_polys)
+                    except Exception:
+                        parks_polys = parks_polys.to_crs(g_proj.graph['crs'])
+                    parks_polys.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=0.8)
 
-        # Layer 2: Roads
-        print("Applying road hierarchy colors...")
-        edge_colors = get_edge_colors_by_type(g_proj)
-        edge_widths = get_edge_widths_by_type(g_proj)
-        crop_xlim, crop_ylim = get_crop_limits(g_proj, point, fig, compensated_dist)
-        ox.plot_graph(
-            g_proj, ax=ax, bgcolor=THEME['bg'],
-            node_size=0,
-            edge_color=edge_colors,
-            edge_linewidth=edge_widths,
-            show=False,
-            close=False,
-        )
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlim(crop_xlim)
-        ax.set_ylim(crop_ylim)
+            # Layer 2: Roads
+            print("Applying road hierarchy colors...")
+            edge_colors = get_edge_colors_by_type(g_proj)
+            edge_widths = get_edge_widths_by_type(g_proj)
+            crop_xlim, crop_ylim = get_crop_limits(g_proj, point, fig, dist)
+            ox.plot_graph(
+                g_proj, ax=ax, bgcolor=THEME['bg'],
+                node_size=0,
+                edge_color=edge_colors,
+                edge_linewidth=edge_widths,
+                show=False,
+                close=False,
+            )
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xlim(crop_xlim)
+            ax.set_ylim(crop_ylim)
+        else:
+            # No road network (e.g. park/lake with no roads) — show water/parks in lat/lon
+            print("⚠ No road network found — rendering water/parks only.")
+            lat_deg = dist / 111000.0
+            lon_deg = dist / (111000.0 * math.cos(math.radians(point[0])))
+            ax.set_xlim(point[1] - lon_deg, point[1] + lon_deg)
+            ax.set_ylim(point[0] - lat_deg, point[0] + lat_deg)
+            ax.set_aspect("equal")
+            ax.axis("off")
+            if water is not None and not water.empty:
+                water_polys = water[water.geometry.type.isin(["Polygon", "MultiPolygon"])]
+                if not water_polys.empty:
+                    water_polys.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=0.5)
+            if parks is not None and not parks.empty:
+                parks_polys = parks[parks.geometry.type.isin(["Polygon", "MultiPolygon"])]
+                if not parks_polys.empty:
+                    parks_polys.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=0.8)
 
     # Layer 3: Gradients (Top and Bottom)
     create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=10)
