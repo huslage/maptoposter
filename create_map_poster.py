@@ -72,18 +72,19 @@ def _err(msg):
 
 
 def _step(n, total, label):
-    """Print step prefix inline; caller follows with _done() or _skip()."""
-    prefix = f"  [{n}/{total}] {label}"
-    print(f"{prefix:<{_COL - 4}}", end="", flush=True)
+    """Print a numbered step line."""
+    if n > 0:
+        print(f"  [{n}/{total}] {label}")
+    else:
+        print(f"  {label}")
 
 
 def _done(note=""):
-    tail = f"  {note}" if note else ""
-    print(f"✓{tail}")
+    pass  # checkmarks removed — steps speak for themselves
 
 
 def _skip(reason=""):
-    print(f"—  {reason}")
+    _warn(reason)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -644,7 +645,6 @@ def create_poster(
     display_city = display_city or name_label or city
     display_country = display_country or country_label or country
 
-    print(f"\nGenerating map for {city}, {country}...")
 
     if topo:
         # --- Topographic mode: elevation contours ---
@@ -937,7 +937,7 @@ def create_poster(
     )
 
     # 5. Save
-    _step(0, 0, f"Saving  →  {output_file}")
+    print(f"  Saving  →  {output_file}")
     fmt = output_format.lower()
     save_kwargs = dict(
         facecolor=THEME["bg"],
@@ -1210,21 +1210,16 @@ Examples:
     # Load custom fonts (before summary so we know if it succeeded)
     custom_fonts = None
     if args.font_family:
-        _step(0, 0, f"Font     {args.font_family}")
         custom_fonts = load_fonts(args.font_family)
-        if custom_fonts:
-            _done()
-        else:
-            _skip("not found, using Roboto")
+        if not custom_fonts:
+            _warn(f"Could not load '{args.font_family}' — using Roboto")
 
     # Resolve coordinates
     try:
         if args.latitude and args.longitude:
             coords = [parse(args.latitude), parse(args.longitude)]
         else:
-            _step(0, 0, "Geocoding")
             coords = get_coordinates(args.city, args.country)
-            _done()
     except Exception as e:
         _err(str(e))
         sys.exit(1)
@@ -1235,6 +1230,8 @@ Examples:
     lon_str = f"{abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
     theme_obj = load_theme(themes_to_generate[0])
     _row("Theme",  theme_obj.get("name", themes_to_generate[0]))
+    if custom_fonts and args.font_family:
+        _row("Font", args.font_family)
     _row("Canvas", f"{args.width:.4g} × {args.height:.4g} in  ·  {args.format.upper()}")
     _row("Coords", f"{lat_str},  {lon_str}")
     _row("Radius", f"{args.distance:,} m")
