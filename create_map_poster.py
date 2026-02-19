@@ -41,21 +41,68 @@ def load_fonts():
     return fonts
 
 
+# Old Android User-Agent causes Google Fonts to serve static TTF files.
+# IE 6 UA triggers EOT (Embedded OpenType) which FreeType cannot read.
+# Modern UA triggers WOFF2 which requires brotli to decompress.
+_TTF_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 4.4.2; Nexus 5 Build/KOT49H) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.70 Mobile Safari/537.36"
+)
+
+
+def _is_loadable_font(path):
+    """Return True if fontTools can open this file as a font."""
+    from fontTools.ttLib import TTFont
+    try:
+        TTFont(path)
+        return True
+    except Exception:
+        return False
+
+
+def _normalize_to_static_ttf(raw_path, weight_int, output_path):
+    """
+    Write a static plain TTF to output_path from raw_path.
+
+    fontTools handles TTF, OTF, and WOFF as input. Setting font.flavor = None
+    before saving strips the WOFF wrapper so the output is a plain TTF that
+    FreeType and matplotlib's PDF backend can embed.
+
+    If raw_path is a variable font (fvar + wght axis), instantiates at
+    weight_int using fontTools.varLib.instancer first.
+
+    Raises RuntimeError on failure.
+    """
+    from fontTools.ttLib import TTFont
+    try:
+        font = TTFont(raw_path)
+    except Exception as e:
+        raise RuntimeError(f"fontTools could not open font: {e}")
+
+    if "fvar" in font:
+        from fontTools.varLib.instancer import instantiateVariableFont
+        wght_axis = next((a for a in font["fvar"].axes if a.axisTag == "wght"), None)
+        if wght_axis:
+            w = float(max(wght_axis.minValue, min(wght_axis.maxValue, weight_int)))
+            font = instantiateVariableFont(font, {"wght": w})
+
+    # Strip WOFF/WOFF2 wrapper → plain TTF output readable by FreeType
+    font.flavor = None
+    font.save(output_path)
+
+
 def _fetch_font_url_for_weight(font_slug, weight, headers):
     """
-    Fetch the TTF download URL for a single font weight via the CSS v2 API.
-    Returns the URL string, or None if this weight is not available.
+    Return the font file URL for a single weight via the CSS v2 API, or None.
 
-    The CSS v2 API handles variable fonts (like Inter) correctly when weights
-    are requested individually. A batch request (e.g. :300,400,700) can silently
-    drop variants for variable fonts, returning only one entry.
+    Requests each weight individually — batch requests silently return only
+    one @font-face block for variable fonts.
     """
     css_url = f"https://fonts.googleapis.com/css2?family={font_slug}:wght@{weight}"
     try:
         resp = requests.get(css_url, headers=headers, timeout=15)
         if resp.status_code != 200:
             return None
-        # src: url(...) — first match is the font file URL
         url_match = re.search(r"url\(([^)]+)\)", resp.text)
         if url_match:
             return url_match.group(1).strip("'\"")
@@ -66,28 +113,25 @@ def _fetch_font_url_for_weight(font_slug, weight, headers):
 
 def download_google_font(font_name):
     """
-    Download a font from Google Fonts and cache the TTF files locally.
+    Download a font from Google Fonts and cache static TTF files locally.
 
-    Requests weights 300, 400, and 700 individually via the CSS v2 API
-    (batch requests silently drop variants for variable fonts). Uses
-    closest-weight matching so fonts that lack a specific weight (e.g. Inter
-    only exposes 100–900 as a variable axis, but the static API may only
-    return certain steps) still work.
+    Probes all nine standard weights (100–900) individually so we discover
+    exactly what the font provides, then maps bold/regular/light to the
+    closest available weight. Variable fonts are instantiated at the target
+    weight via fonttools so matplotlib's PDF backend can embed them.
 
     Cached files live in fonts/google_fonts/<Font_Name>/.
     Returns a dict with keys 'bold', 'regular', 'light' → file paths.
-    Raises RuntimeError if the font cannot be found.
+    Raises RuntimeError if the font cannot be found or downloaded.
     """
     cache_dir = os.path.join(FONTS_DIR, "google_fonts", font_name.replace(" ", "_"))
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Old User-Agent causes Google Fonts to serve TTF instead of WOFF2
-    headers = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"}
+    headers = {"User-Agent": _TTF_USER_AGENT}
     font_slug = font_name.replace(" ", "+")
 
     print(f"Fetching Google Font '{font_name}'...")
 
-    # Probe standard weights individually; collect what the font actually has
     probe_weights = ["100", "200", "300", "400", "500", "600", "700", "800", "900"]
     weight_to_url = {}
     for w in probe_weights:
@@ -112,7 +156,6 @@ def download_google_font(font_name):
         "light":   closest("300"),
     }
 
-    # Report any non-exact matches so users know what they're getting
     for role, weight in role_weights.items():
         targets = {"bold": "700", "regular": "400", "light": "300"}
         if weight != targets[role]:
@@ -121,6 +164,13 @@ def download_google_font(font_name):
     result = {}
     for role, weight in role_weights.items():
         filepath = os.path.join(cache_dir, f"{role}_{weight}.ttf")
+
+        # Discard cached files that fontTools can no longer open (e.g. stale
+        # EOT files written by the old IE User-Agent before this fix).
+        if os.path.exists(filepath) and not _is_loadable_font(filepath):
+            print(f"  Stale cached file for {role} is not a valid font — re-downloading...")
+            os.remove(filepath)
+
         if not os.path.exists(filepath):
             print(f"  Downloading {font_name} weight {weight} ({role})...")
             try:
@@ -128,10 +178,23 @@ def download_google_font(font_name):
                 font_resp.raise_for_status()
             except requests.RequestException as e:
                 raise RuntimeError(f"Failed to download font file: {e}")
-            with open(filepath, "wb") as f:
+
+            raw_path = filepath + ".raw"
+            with open(raw_path, "wb") as f:
                 f.write(font_resp.content)
+
+            # Normalize to plain static TTF (converts WOFF, instantiates variable fonts)
+            try:
+                _normalize_to_static_ttf(raw_path, int(weight), filepath)
+                os.remove(raw_path)
+            except RuntimeError as e:
+                os.remove(raw_path)
+                raise RuntimeError(
+                    f"Could not process downloaded font '{font_name}' weight {weight}: {e}"
+                )
         else:
             print(f"  Using cached {font_name} weight {weight} ({role})")
+
         result[role] = filepath
 
     print(f"✓ Font '{font_name}' ready")
