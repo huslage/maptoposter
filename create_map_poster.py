@@ -41,67 +41,88 @@ def load_fonts():
     return fonts
 
 
+def _fetch_font_url_for_weight(font_slug, weight, headers):
+    """
+    Fetch the TTF download URL for a single font weight via the CSS v2 API.
+    Returns the URL string, or None if this weight is not available.
+
+    The CSS v2 API handles variable fonts (like Inter) correctly when weights
+    are requested individually. A batch request (e.g. :300,400,700) can silently
+    drop variants for variable fonts, returning only one entry.
+    """
+    css_url = f"https://fonts.googleapis.com/css2?family={font_slug}:wght@{weight}"
+    try:
+        resp = requests.get(css_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        # src: url(...) — first match is the font file URL
+        url_match = re.search(r"url\(([^)]+)\)", resp.text)
+        if url_match:
+            return url_match.group(1).strip("'\"")
+    except requests.RequestException:
+        pass
+    return None
+
+
 def download_google_font(font_name):
     """
     Download a font from Google Fonts and cache the TTF files locally.
 
-    Fetches the bold (700), regular (400), and light (300) variants.
-    If the 300 weight is unavailable the regular (400) is used for light.
+    Requests weights 300, 400, and 700 individually via the CSS v2 API
+    (batch requests silently drop variants for variable fonts). Uses
+    closest-weight matching so fonts that lack a specific weight (e.g. Inter
+    only exposes 100–900 as a variable axis, but the static API may only
+    return certain steps) still work.
 
-    Returns a dict with keys 'bold', 'regular', 'light' mapping to file paths.
-    Raises RuntimeError if the font cannot be found or downloaded.
+    Cached files live in fonts/google_fonts/<Font_Name>/.
+    Returns a dict with keys 'bold', 'regular', 'light' → file paths.
+    Raises RuntimeError if the font cannot be found.
     """
     cache_dir = os.path.join(FONTS_DIR, "google_fonts", font_name.replace(" ", "_"))
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Use an old User-Agent so the API returns TTF format instead of WOFF2
+    # Old User-Agent causes Google Fonts to serve TTF instead of WOFF2
     headers = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"}
     font_slug = font_name.replace(" ", "+")
-    css_url = f"https://fonts.googleapis.com/css?family={font_slug}:300,400,700"
 
     print(f"Fetching Google Font '{font_name}'...")
-    try:
-        resp = requests.get(css_url, headers=headers, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Could not fetch '{font_name}' from Google Fonts: {e}")
 
-    css = resp.text
-
-    # Parse @font-face blocks to extract weight → URL mappings
+    # Probe standard weights individually; collect what the font actually has
+    probe_weights = ["100", "200", "300", "400", "500", "600", "700", "800", "900"]
     weight_to_url = {}
-    for block in re.findall(r"@font-face\s*\{([^}]+)\}", css, re.DOTALL):
-        weight_match = re.search(r"font-weight:\s*(\d+)", block)
-        url_match = re.search(r"url\(([^)]+)\)", block)
-        if weight_match and url_match:
-            weight = weight_match.group(1)
-            url = url_match.group(1).strip("'\"")
-            weight_to_url[weight] = url
+    for w in probe_weights:
+        url = _fetch_font_url_for_weight(font_slug, w, headers)
+        if url:
+            weight_to_url[w] = url
 
     if not weight_to_url:
         raise RuntimeError(
             f"Font '{font_name}' not found on Google Fonts. "
-            "Check the spelling (e.g. 'Roboto', 'Open Sans', 'Montserrat')."
+            "Check the spelling (e.g. 'Inter', 'Open Sans', 'Montserrat')."
         )
 
-    # Resolve which weight to use for each role
+    available = sorted(weight_to_url, key=int)
+
+    def closest(target):
+        return min(available, key=lambda w: abs(int(w) - int(target)))
+
     role_weights = {
-        "bold": "700",
-        "regular": "400",
-        "light": "300" if "300" in weight_to_url else "400",
+        "bold":    closest("700"),
+        "regular": closest("400"),
+        "light":   closest("300"),
     }
+
+    # Report any non-exact matches so users know what they're getting
+    for role, weight in role_weights.items():
+        targets = {"bold": "700", "regular": "400", "light": "300"}
+        if weight != targets[role]:
+            print(f"  ⚠ Weight {targets[role]} not available; using {weight} for {role}")
 
     result = {}
     for role, weight in role_weights.items():
-        if weight not in weight_to_url:
-            raise RuntimeError(
-                f"Weight {weight} not available for font '{font_name}'. "
-                f"Available weights: {sorted(weight_to_url)}"
-            )
-
         filepath = os.path.join(cache_dir, f"{role}_{weight}.ttf")
         if not os.path.exists(filepath):
-            print(f"  Downloading {font_name} weight {weight}...")
+            print(f"  Downloading {font_name} weight {weight} ({role})...")
             try:
                 font_resp = requests.get(weight_to_url[weight], timeout=15)
                 font_resp.raise_for_status()
@@ -110,8 +131,7 @@ def download_google_font(font_name):
             with open(filepath, "wb") as f:
                 f.write(font_resp.content)
         else:
-            print(f"  Using cached {font_name} weight {weight}")
-
+            print(f"  Using cached {font_name} weight {weight} ({role})")
         result[role] = filepath
 
     print(f"✓ Font '{font_name}' ready")
